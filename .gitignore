@@ -1,0 +1,32 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# PyTorch Model Checkpoints & Weights
+*.pth
+*.pt
+*.ckpt
+*.onnx
+
+# Datasets and Local Archives
+data/
+dataset/
+*.zip
+*.tar
+*.tar.gz
+
+# Benchmarks and Evaluation Artifacts
+benchmark_results/
+runs/
+wandb/
+
+# IDE & Editor Configs
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS Generated
+.DS_Store
+Thumbs.db
