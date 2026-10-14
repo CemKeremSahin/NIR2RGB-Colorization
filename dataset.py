@@ -1,8 +1,10 @@
 """
 dataset.py - Multi-Band NIR & RGB Veri Yükleyici (Data Pipeline)
 ==============================================================
-Bu modül, hem 3 ayrı dalga boyu klasörünü (785nm, 850nm, 940nm + gt_rgb)
-hem de standart (nir + rgb) klasör yapılarını otomatik olarak algılar ve yükler.
+Bu modül, dalga boyu klasörlerindeki (785nm, 850nm, 940nm ve gt_rgb)
+dosyaları alfabetik/sıralı olarak (sorted + zip) eşleştirir.
+Böylece dosya isimlerindeki basamak farklılıklarından (001.bmp vs 0001.bmp)
+etkilenmeden kareleri kusursuz şekilde birbirine bağlar.
 IEEE Access 2026 ve data-pipeline-specialist standartlarına tam uyumludur.
 """
 
@@ -22,10 +24,10 @@ class NIRRGBDataset(Dataset):
     Desteklenen Klasör Yapıları:
     1. 4-Sensör Yapısı (Önerilen / Gerçek Veri):
        data_dir/
-       ├── 785nm/   (Kanal 1)
-       ├── 850nm/   (Kanal 2)
-       ├── 940nm/   (Kanal 3)
-       └── gt_rgb/  (veya rgb/) (Hedef Renkli Görüntü)
+       ├── 785nm/   (Kanal 1 - örn: 001.bmp)
+       ├── 850nm/   (Kanal 2 - örn: 001.bmp)
+       ├── 940nm/   (Kanal 3 - örn: 001.bmp)
+       └── gt_rgb/  (veya rgb/) (Hedef Renkli - örn: 0001.bmp)
        
     2. 2-Klasörlü Klasik Yapı:
        data_dir/
@@ -47,8 +49,9 @@ class NIRRGBDataset(Dataset):
         if not os.path.isdir(self.data_dir):
             raise FileNotFoundError(f"[Data Pipeline] Belirtilen veri klasörü bulunamadı: {self.data_dir}")
 
+        valid_exts = ('.bmp', '.png', '.jpg', '.jpeg', '.tif', '.tiff')
+
         # 1. Klasör Modunu Otomatik Tespit Et
-        # 4-Sensör modunu kontrol et (785nm, 850nm, 940nm)
         path_785 = os.path.join(self.data_dir, "785nm")
         path_850 = os.path.join(self.data_dir, "850nm")
         path_940 = os.path.join(self.data_dir, "940nm")
@@ -67,7 +70,29 @@ class NIRRGBDataset(Dataset):
             else:
                 raise FileNotFoundError(f"[Data Pipeline] {self.data_dir} içinde 'gt_rgb' veya 'rgb' klasörü bulunamadı!")
 
-            ref_dir = self.dir_785
+            # Dosyaları alfabetik/sıralı olarak listele
+            files_785 = sorted([f for f in os.listdir(self.dir_785) if f.lower().endswith(valid_exts)])
+            files_850 = sorted([f for f in os.listdir(self.dir_850) if f.lower().endswith(valid_exts)])
+            files_940 = sorted([f for f in os.listdir(self.dir_940) if f.lower().endswith(valid_exts)])
+            files_rgb = sorted([f for f in os.listdir(self.dir_rgb) if f.lower().endswith(valid_exts)])
+
+            min_len = min(len(files_785), len(files_850), len(files_940), len(files_rgb))
+
+            if min_len == 0:
+                raise RuntimeError(
+                    f"[Data Pipeline Hatası] {self.data_dir} içinde dosya bulunamadı!\n"
+                    f"785nm: {len(files_785)}, 850nm: {len(files_850)}, "
+                    f"940nm: {len(files_940)}, RGB: {len(files_rgb)}"
+                )
+
+            # Kareleri sıralı olarak (zip) eşleştir
+            self.samples = list(zip(
+                files_785[:min_len],
+                files_850[:min_len],
+                files_940[:min_len],
+                files_rgb[:min_len]
+            ))
+
         else:
             # Standart 2-klasörlü mod (nir + rgb)
             self.mode = "standard_folders"
@@ -80,79 +105,79 @@ class NIRRGBDataset(Dataset):
                     f"Ya '785nm', '850nm', '940nm', 'gt_rgb' klasörleri ya da 'nir', 'rgb' klasörleri olmalıdır. "
                     f"Taranan dizin: {self.data_dir}"
                 )
-            ref_dir = self.dir_nir
+            
+            files_nir = sorted([f for f in os.listdir(self.dir_nir) if f.lower().endswith(valid_exts)])
+            files_rgb = sorted([f for f in os.listdir(self.dir_rgb) if f.lower().endswith(valid_exts)])
+            min_len = min(len(files_nir), len(files_rgb))
 
-        # 2. Dosya Listelerini Eşleştir
-        valid_exts = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
-        all_files = sorted([f for f in os.listdir(ref_dir) if os.path.splitext(f)[1].lower() in valid_exts])
-        
-        # Sadece RGB klasöründe de karşılığı olan dosyaları tut
-        self.filenames = [f for f in all_files if os.path.exists(os.path.join(self.dir_rgb, f))]
+            if min_len == 0:
+                raise RuntimeError(f"[Data Pipeline Hatası] NIR ({len(files_nir)}) veya RGB ({len(files_rgb)}) klasöründe dosya yok!")
 
-        if len(self.filenames) == 0:
-            raise RuntimeError(f"[Data Pipeline Hatası] {self.data_dir} dizininde eşleşen hiçbir NIR ve RGB görseli bulunamadı!")
+            self.samples = list(zip(files_nir[:min_len], files_rgb[:min_len]))
 
-        print(f"[Data Pipeline] Mod: '{self.mode}' | Toplam {len(self.filenames)} eşleşen görsel yüklendi.")
+        print(f"[Data Pipeline] Mod: '{self.mode}' | Toplam {len(self.samples)} eşleşen kare başarıyla bağlandı.")
 
     def __len__(self) -> int:
-        return len(self.filenames)
+        return len(self.samples)
 
     def __getitem__(self, idx: int) -> Dict[str, torch.Tensor]:
-        fname = self.filenames[idx]
-        rgb_path = os.path.join(self.dir_rgb, fname)
-
         try:
-            # 1. RGB Hedef Görüntüyü Yükle
-            gt_img = Image.open(rgb_path).convert('RGB')
-            
-            # 2. NIR Görüntülerini Yükle
             if self.mode == "multiband_folders":
-                # 3 ayrı dalga boyunu tek kanallı (L - Grayscale) olarak oku
-                img_785 = Image.open(os.path.join(self.dir_785, fname)).convert('L')
-                img_850 = Image.open(os.path.join(self.dir_850, fname)).convert('L')
-                img_940 = Image.open(os.path.join(self.dir_940, fname)).convert('L')
+                f7, f8, f9, fr = self.samples[idx]
                 
+                # 1. RGB Hedef Görüntü
+                gt_img = Image.open(os.path.join(self.dir_rgb, fr)).convert('RGB')
+                
+                # 2. 3 Ayrı NIR Bandı (L - Grayscale)
+                img_785 = Image.open(os.path.join(self.dir_785, f7)).convert('L')
+                img_850 = Image.open(os.path.join(self.dir_850, f8)).convert('L')
+                img_940 = Image.open(os.path.join(self.dir_940, f9)).convert('L')
+
                 # Boyut uyarlaması
+                gt_img = gt_img.resize((self.image_size[1], self.image_size[0]), Image.BILINEAR)
                 img_785 = img_785.resize((self.image_size[1], self.image_size[0]), Image.BILINEAR)
                 img_850 = img_850.resize((self.image_size[1], self.image_size[0]), Image.BILINEAR)
                 img_940 = img_940.resize((self.image_size[1], self.image_size[0]), Image.BILINEAR)
+
+                # 3. Senkronize Veri Artırma (Eğitimde yatay çevirme)
+                if self.is_train and torch.rand(1).item() > 0.5:
+                    gt_img = TF.hflip(gt_img)
+                    img_785 = TF.hflip(img_785)
+                    img_850 = TF.hflip(img_850)
+                    img_940 = TF.hflip(img_940)
+
+                # 4. Normalizasyon: [-1.0, 1.0]
+                gt_tensor = TF.to_tensor(gt_img) * 2.0 - 1.0  # [3, H, W]
+                t_785 = TF.to_tensor(img_785) * 2.0 - 1.0     # [1, H, W]
+                t_850 = TF.to_tensor(img_850) * 2.0 - 1.0     # [1, H, W]
+                t_940 = TF.to_tensor(img_940) * 2.0 - 1.0     # [1, H, W]
+                nir_tensor = torch.cat([t_785, t_850, t_940], dim=0)  # [3, H, W]
+
             else:
-                nir_img = Image.open(os.path.join(self.dir_nir, fname))
+                fnir, fr = self.samples[idx]
+                gt_img = Image.open(os.path.join(self.dir_rgb, fr)).convert('RGB')
+                nir_img = Image.open(os.path.join(self.dir_nir, fnir))
                 if nir_img.mode != 'RGB':
                     nir_img = nir_img.convert('RGB')
+
+                gt_img = gt_img.resize((self.image_size[1], self.image_size[0]), Image.BILINEAR)
                 nir_img = nir_img.resize((self.image_size[1], self.image_size[0]), Image.BILINEAR)
 
-            gt_img = gt_img.resize((self.image_size[1], self.image_size[0]), Image.BILINEAR)
+                if self.is_train and torch.rand(1).item() > 0.5:
+                    gt_img = TF.hflip(gt_img)
+                    nir_img = TF.hflip(nir_img)
+
+                gt_tensor = TF.to_tensor(gt_img) * 2.0 - 1.0
+                nir_tensor = TF.to_tensor(nir_img) * 2.0 - 1.0
 
         except Exception as e:
-            raise IOError(f"[Data Pipeline] Görsel okuma hatası ({fname}): {str(e)}")
-
-        # 3. Senkronize Veri Artırma (Eğitimde yatay çevirme)
-        if self.is_train and torch.rand(1).item() > 0.5:
-            gt_img = TF.hflip(gt_img)
-            if self.mode == "multiband_folders":
-                img_785 = TF.hflip(img_785)
-                img_850 = TF.hflip(img_850)
-                img_940 = TF.hflip(img_940)
-            else:
-                nir_img = TF.hflip(nir_img)
-
-        # 4. Normalizasyon: [0, 255] -> [-1.0, 1.0] (Tanh aktivasyonuna uygun)
-        gt_tensor = TF.to_tensor(gt_img) * 2.0 - 1.0  # [3, H, W]
-
-        if self.mode == "multiband_folders":
-            t_785 = TF.to_tensor(img_785) * 2.0 - 1.0  # [1, H, W]
-            t_850 = TF.to_tensor(img_850) * 2.0 - 1.0  # [1, H, W]
-            t_940 = TF.to_tensor(img_940) * 2.0 - 1.0  # [1, H, W]
-            nir_tensor = torch.cat([t_785, t_850, t_940], dim=0)  # [3, H, W]
-        else:
-            nir_tensor = TF.to_tensor(nir_img) * 2.0 - 1.0  # [3, H, W]
+            raise IOError(f"[Data Pipeline] Görsel yükleme hatası (indeks {idx}): {str(e)}")
 
         # 5. Savunmacı Mühendislik: NaN veya Sonsuz değer kontrolü
         if torch.isnan(gt_tensor).any() or torch.isnan(nir_tensor).any():
-            raise ValueError(f"[Data Pipeline Error] NaN tensör tespit edildi! Dosya: {fname}")
+            raise ValueError(f"[Data Pipeline Error] NaN tensör tespit edildi! Indeks: {idx}")
         if torch.isinf(gt_tensor).any() or torch.isinf(nir_tensor).any():
-            raise ValueError(f"[Data Pipeline Error] Inf tensör tespit edildi! Dosya: {fname}")
+            raise ValueError(f"[Data Pipeline Error] Inf tensör tespit edildi! Indeks: {idx}")
 
         # 6. RGB'den Grayscale Kılavuzu: Y = 0.299 R + 0.587 G + 0.114 B (Teacher geometrisi)
         gray_tensor = 0.299 * gt_tensor[0:1, :, :] + 0.587 * gt_tensor[1:2, :, :] + 0.114 * gt_tensor[2:3, :, :]
